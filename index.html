@@ -148,7 +148,8 @@ btnReset.addEventListener('click', () => {
 
 async function processFile(file) {
   overlay.style.display = 'none';
-  btnDl.style.display = btnReset.style.display = 'none';
+  btnDl.style.display = 'none';
+  btnReset.style.display = 'none';
   statsEl.textContent = '';
   if (trackLayer)  { map.removeLayer(trackLayer);  trackLayer  = null; }
   if (markersLayer){ map.removeLayer(markersLayer); markersLayer = null; }
@@ -178,10 +179,11 @@ async function processFile(file) {
     const method = data.method === 'osm' ? 'fourches OSM' : 'angles (fallback)';
     statusEl.textContent = `TbT généré — ${data.turnCount} virages (${method})`;
     statsEl.textContent  = `${data.pointCount} pts`;
-    btnDl.style.display = btnReset.style.display = '';
+    btnDl.style.display = 'inline-block';
+    btnReset.style.display = 'inline-block';
   } catch(e) {
     statusEl.textContent = '⚠ ' + e.message;
-    btnReset.style.display = '';
+    btnReset.style.display = 'inline-block';
   } finally {
     spinner.classList.remove('show');
   }
