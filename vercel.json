@@ -1,5 +1,4 @@
 {
-  "outputDirectory": "public",
   "functions": {
     "api/process.py": {
       "maxDuration": 120
