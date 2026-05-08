@@ -1,4 +1,4 @@
-from http.server import BaseHTTPRequestHandler
+from flask import Flask, request, jsonify, send_from_directory
 import json
 import math
 import io
@@ -7,8 +7,9 @@ import urllib.parse
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(__file__))
 import gpxpy
+
+app = Flask(__name__, static_folder='.', static_url_path='')
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -176,60 +177,56 @@ def generate_suunto_gpx(points, turn_waypoints):
     lines += ["</rte>", "</gpx>"]
     return "\n".join(lines)
 
-# ── Handler ────────────────────────────────────────────────────────────────────
+# ── Flask routes ───────────────────────────────────────────────────────────────
 
-class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            gpx_text = body.get("gpx", "")
+@app.route("/")
+def index():
+    return send_from_directory(".", "index.html")
 
-            gpx = gpxpy.parse(io.StringIO(gpx_text))
+
+@app.route("/api", methods=["POST", "OPTIONS"])
+def process():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    body = request.get_json(force=True)
+    gpx_text = body.get("gpx", "")
+
+    try:
+        gpx = gpxpy.parse(io.StringIO(gpx_text))
+        points = [
+            (pt.latitude, pt.longitude, pt.elevation)
+            for track in gpx.tracks for seg in track.segments for pt in seg.points
+        ]
+        if not points:
             points = [
                 (pt.latitude, pt.longitude, pt.elevation)
-                for track in gpx.tracks for seg in track.segments for pt in seg.points
+                for route in gpx.routes for pt in route.points
             ]
-            if not points:
-                points = [
-                    (pt.latitude, pt.longitude, pt.elevation)
-                    for route in gpx.routes for pt in route.points
-                ]
-            if not points:
-                return self._json(400, {"error": "No track points found"})
+        if not points:
+            return jsonify({"error": "No track points found"}), 400
 
-            turn_waypoints, method = detect_turns(points)
-            gpx_content = generate_suunto_gpx(points, turn_waypoints)
+        turn_waypoints, method = detect_turns(points)
+        gpx_content = generate_suunto_gpx(points, turn_waypoints)
 
-            self._json(200, {
-                "gpxContent": gpx_content,
-                "routePoints": [[p[0], p[1]] for p in points],
-                "turnWaypoints": [[lat, lon, name] for lat, lon, name, _ in turn_waypoints],
-                "pointCount": len(points),
-                "turnCount": len(turn_waypoints),
-                "method": method,
-            })
-        except Exception as e:
-            self._json(500, {"error": str(e)})
+        return jsonify({
+            "gpxContent": gpx_content,
+            "routePoints": [[p[0], p[1]] for p in points],
+            "turnWaypoints": [[lat, lon, name] for lat, lon, name, _ in turn_waypoints],
+            "pointCount": len(points),
+            "turnCount": len(turn_waypoints),
+            "method": method,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self._cors()
-        self.end_headers()
 
-    def _json(self, code, data):
-        payload = json.dumps(data).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", len(payload))
-        self._cors()
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+@app.after_request
+def cors(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    return response
 
     def log_message(self, *_):
         pass
