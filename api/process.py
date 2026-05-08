@@ -1,3 +1,4 @@
+from http.server import BaseHTTPRequestHandler
 import json
 import math
 import io
@@ -6,12 +7,8 @@ import urllib.parse
 import os
 import sys
 
-from flask import Flask, request, jsonify
-
 sys.path.insert(0, os.path.dirname(__file__))
 import gpxpy
-
-app = Flask(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -70,12 +67,10 @@ def get_osm_junctions(points, padding=0.003):
     lons = [p[1] for p in points]
     s, n = min(lats) - padding, max(lats) + padding
     w, e = min(lons) - padding, max(lons) + padding
-
     query = f"""[out:json][timeout:55];
 (way[highway]({s},{w},{n},{e}););
 (._;>;);
 out body;"""
-
     data_enc = urllib.parse.urlencode({"data": query}).encode()
     req = urllib.request.Request(
         "https://overpass-api.de/api/interpreter",
@@ -84,19 +79,17 @@ out body;"""
     )
     with urllib.request.urlopen(req, timeout=58) as resp:
         data = json.loads(resp.read())
-
     node_count: dict = {}
     for el in data["elements"]:
         if el["type"] == "way":
             for nid in el["nodes"]:
                 node_count[nid] = node_count.get(nid, 0) + 1
-
     return [(el["lat"], el["lon"]) for el in data["elements"]
             if el["type"] == "node" and node_count.get(el["id"], 0) >= 2]
 
 
 def snap_junctions_to_route(junctions, points):
-    hits = set()
+    hits: set = set()
     for jlat, jlon in junctions:
         best_i, best_d = 0, float("inf")
         for i, pt in enumerate(points):
@@ -151,12 +144,9 @@ def detect_turns(points):
     try:
         junctions = get_osm_junctions(points)
         indices = snap_junctions_to_route(junctions, points)
-        turns = _turns_from_indices(points, indices, MIN_TURN_ANGLE)
-        return turns, "osm"
+        return _turns_from_indices(points, indices, MIN_TURN_ANGLE), "osm"
     except Exception:
-        indices = list(range(1, len(points) - 1))
-        turns = _turns_from_indices(points, indices, 30)
-        return turns, "angle"
+        return _turns_from_indices(points, list(range(1, len(points) - 1)), 30), "angle"
 
 # ── GPX generation ─────────────────────────────────────────────────────────────
 
@@ -186,45 +176,60 @@ def generate_suunto_gpx(points, turn_waypoints):
     lines += ["</rte>", "</gpx>"]
     return "\n".join(lines)
 
-# ── Flask route ────────────────────────────────────────────────────────────────
+# ── Handler ────────────────────────────────────────────────────────────────────
 
-@app.after_request
-def cors(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-    return response
+class handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            gpx_text = body.get("gpx", "")
 
+            gpx = gpxpy.parse(io.StringIO(gpx_text))
+            points = [
+                (pt.latitude, pt.longitude, pt.elevation)
+                for track in gpx.tracks for seg in track.segments for pt in seg.points
+            ]
+            if not points:
+                points = [
+                    (pt.latitude, pt.longitude, pt.elevation)
+                    for route in gpx.routes for pt in route.points
+                ]
+            if not points:
+                return self._json(400, {"error": "No track points found"})
 
-@app.route("/api/process", methods=["POST", "OPTIONS"])
-def process():
-    if request.method == "OPTIONS":
-        return jsonify({}), 200
+            turn_waypoints, method = detect_turns(points)
+            gpx_content = generate_suunto_gpx(points, turn_waypoints)
 
-    body = request.get_json(force=True)
-    gpx_text = body.get("gpx", "")
+            self._json(200, {
+                "gpxContent": gpx_content,
+                "routePoints": [[p[0], p[1]] for p in points],
+                "turnWaypoints": [[lat, lon, name] for lat, lon, name, _ in turn_waypoints],
+                "pointCount": len(points),
+                "turnCount": len(turn_waypoints),
+                "method": method,
+            })
+        except Exception as e:
+            self._json(500, {"error": str(e)})
 
-    gpx = gpxpy.parse(io.StringIO(gpx_text))
-    points = [
-        (pt.latitude, pt.longitude, pt.elevation)
-        for track in gpx.tracks for seg in track.segments for pt in seg.points
-    ]
-    if not points:
-        points = [
-            (pt.latitude, pt.longitude, pt.elevation)
-            for route in gpx.routes for pt in route.points
-        ]
-    if not points:
-        return jsonify({"error": "No track points found"}), 400
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self._cors()
+        self.end_headers()
 
-    turn_waypoints, method = detect_turns(points)
-    gpx_content = generate_suunto_gpx(points, turn_waypoints)
+    def _json(self, code, data):
+        payload = json.dumps(data).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", len(payload))
+        self._cors()
+        self.end_headers()
+        self.wfile.write(payload)
 
-    return jsonify({
-        "gpxContent": gpx_content,
-        "routePoints": [[p[0], p[1]] for p in points],
-        "turnWaypoints": [[lat, lon, name] for lat, lon, name, _ in turn_waypoints],
-        "pointCount": len(points),
-        "turnCount": len(turn_waypoints),
-        "method": method,
-    })
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def log_message(self, *_):
+        pass
