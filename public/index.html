@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GPX → Suunto TbT</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           height: 100dvh; display: flex; flex-direction: column;
+           background: #111; color: #f0f0f0; }
+
+    /* ── Header ── */
+    #bar { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+           background: #1c1c1e; border-bottom: 1px solid #2c2c2e; flex-shrink: 0; }
+    #bar h1 { font-size: 15px; font-weight: 600; white-space: nowrap; }
+    #bar h1 span { color: #3b82f6; }
+    #status { font-size: 13px; color: #8e8e93; flex: 1; min-width: 0;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #stats  { font-size: 12px; color: #636366; white-space: nowrap; }
+    #btn-dl { display: none; padding: 6px 14px; background: #2563eb; color: #fff;
+              border: none; border-radius: 8px; cursor: pointer; font-size: 13px;
+              font-weight: 500; white-space: nowrap; transition: background .15s; }
+    #btn-dl:hover { background: #1d4ed8; }
+    #btn-reset { display: none; padding: 6px 12px; background: transparent; color: #8e8e93;
+                 border: 1px solid #3a3a3c; border-radius: 8px; cursor: pointer;
+                 font-size: 13px; transition: border-color .15s; }
+    #btn-reset:hover { border-color: #636366; color: #f0f0f0; }
+
+    /* ── Map ── */
+    #map { flex: 1; }
+
+    /* ── Drop overlay ── */
+    #overlay { position: absolute; inset: 0; z-index: 1000;
+               display: flex; align-items: center; justify-content: center;
+               background: rgba(0,0,0,.55); backdrop-filter: blur(2px); }
+    #drop-box { border: 2px dashed #3a3a3c; border-radius: 20px;
+                padding: 52px 72px; text-align: center; color: #8e8e93;
+                transition: border-color .2s, color .2s; cursor: pointer; }
+    #drop-box.over, #drop-box:hover { border-color: #3b82f6; color: #3b82f6; }
+    #drop-box svg { margin: 0 auto 14px; display: block; }
+    #drop-box p  { font-size: 16px; font-weight: 500; margin-bottom: 6px; }
+    #drop-box small { font-size: 13px; }
+    #drop-box label { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+    #file-in { display: none; }
+
+    /* ── Spinner ── */
+    #spinner { display: none; position: absolute; bottom: 16px; right: 16px;
+               z-index: 900; background: #1c1c1e; border: 1px solid #2c2c2e;
+               border-radius: 12px; padding: 10px 14px; font-size: 13px;
+               color: #8e8e93; gap: 8px; align-items: center; }
+    #spinner.show { display: flex; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .ring { width: 16px; height: 16px; border: 2px solid #3a3a3c;
+            border-top-color: #3b82f6; border-radius: 50%;
+            animation: spin .7s linear infinite; flex-shrink: 0; }
+
+    /* ── Turn legend dot ── */
+    .turn-dot { width: 10px; height: 10px; background: #22c55e;
+                border: 2px solid #fff; border-radius: 50%; }
+  </style>
+</head>
+<body>
+
+<div id="bar">
+  <h1>GPX <span>→</span> Suunto TbT</h1>
+  <span id="status">Déposez un fichier GPX</span>
+  <span id="stats"></span>
+  <button id="btn-reset">Nouvelle trace</button>
+  <button id="btn-dl">Enregistrer GPX</button>
+</div>
+
+<div id="map"></div>
+
+<div id="overlay">
+  <div id="drop-box" id="drop-box">
+    <svg width="44" height="44" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+      <polyline points="17 8 12 3 7 8"/>
+      <line x1="12" y1="3" x2="12" y2="15"/>
+    </svg>
+    <p>Déposer un fichier GPX</p>
+    <small>ou <label for="file-in">choisir un fichier</label></small>
+    <input type="file" id="file-in" accept=".gpx">
+  </div>
+</div>
+
+<div id="spinner"><div class="ring"></div><span id="spinner-msg">Requête OSM…</span></div>
+
+<script>
+const map = L.map('map', { zoomControl: true }).setView([46.5, 2.3], 6);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© <a href="https://openstreetmap.org">OpenStreetMap</a>',
+  maxZoom: 19
+}).addTo(map);
+
+let trackLayer = null, markersLayer = null, gpxBlob = null, outName = 'suunto-tbt.gpx';
+
+const overlay   = document.getElementById('overlay');
+const dropBox   = document.getElementById('drop-box');
+const statusEl  = document.getElementById('status');
+const statsEl   = document.getElementById('stats');
+const spinner   = document.getElementById('spinner');
+const spinMsg   = document.getElementById('spinner-msg');
+const btnDl     = document.getElementById('btn-dl');
+const btnReset  = document.getElementById('btn-reset');
+
+// ── Drag & drop ──────────────────────────────────────────────────────────────
+
+['dragenter','dragover'].forEach(ev =>
+  document.addEventListener(ev, e => { e.preventDefault(); dropBox.classList.add('over'); }));
+['dragleave','drop'].forEach(ev =>
+  document.addEventListener(ev, e => { if(ev==='drop') e.preventDefault(); dropBox.classList.remove('over'); }));
+document.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f) processFile(f);
+});
+document.getElementById('file-in').addEventListener('change', e => {
+  if (e.target.files[0]) processFile(e.target.files[0]);
+});
+dropBox.addEventListener('click', () => document.getElementById('file-in').click());
+
+// ── Buttons ──────────────────────────────────────────────────────────────────
+
+btnDl.addEventListener('click', () => {
+  if (!gpxBlob) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(gpxBlob);
+  a.download = outName;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+btnReset.addEventListener('click', () => {
+  if (trackLayer)  { map.removeLayer(trackLayer);  trackLayer  = null; }
+  if (markersLayer){ map.removeLayer(markersLayer); markersLayer = null; }
+  gpxBlob = null;
+  overlay.style.display = '';
+  btnDl.style.display = btnReset.style.display = 'none';
+  statusEl.textContent = 'Déposez un fichier GPX';
+  statsEl.textContent = '';
+});
+
+// ── Core ─────────────────────────────────────────────────────────────────────
+
+async function processFile(file) {
+  overlay.style.display = 'none';
+  btnDl.style.display = btnReset.style.display = 'none';
+  statsEl.textContent = '';
+  if (trackLayer)  { map.removeLayer(trackLayer);  trackLayer  = null; }
+  if (markersLayer){ map.removeLayer(markersLayer); markersLayer = null; }
+
+  outName = file.name.replace(/\.gpx$/i, '') + '-tbt.gpx';
+  const gpxText = await file.text();
+
+  statusEl.textContent = 'Lecture de la trace…';
+  showPreview(gpxText);
+
+  spinMsg.textContent = 'Détection des fourches OSM…';
+  spinner.classList.add('show');
+  statusEl.textContent = 'Requête Overpass + calcul TbT…';
+
+  try {
+    const res = await fetch('/api/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ gpx: gpxText })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Erreur ${res.status}`);
+
+    gpxBlob = new Blob([data.gpxContent], { type: 'application/gpx+xml' });
+    showTurns(data.turnWaypoints);
+
+    const method = data.method === 'osm' ? 'fourches OSM' : 'angles (fallback)';
+    statusEl.textContent = `TbT généré — ${data.turnCount} virages (${method})`;
+    statsEl.textContent  = `${data.pointCount} pts`;
+    btnDl.style.display = btnReset.style.display = '';
+  } catch(e) {
+    statusEl.textContent = '⚠ ' + e.message;
+    btnReset.style.display = '';
+  } finally {
+    spinner.classList.remove('show');
+  }
+}
+
+function showPreview(gpxText) {
+  const pts = [];
+  let re = /<trkpt[^>]+lat="([^"]+)"[^>]+lon="([^"]+)"/g, m;
+  while ((m = re.exec(gpxText))) pts.push([+m[1], +m[2]]);
+  if (!pts.length) {
+    re = /<rtept[^>]+lat="([^"]+)"[^>]+lon="([^"]+)"/g;
+    while ((m = re.exec(gpxText))) pts.push([+m[1], +m[2]]);
+  }
+  if (!pts.length) return;
+  trackLayer = L.polyline(pts, { color: '#3b82f6', weight: 3, opacity: .85 }).addTo(map);
+  map.fitBounds(trackLayer.getBounds(), { padding: [32, 32] });
+}
+
+function showTurns(turns) {
+  if (!turns?.length) return;
+  markersLayer = L.layerGroup().addTo(map);
+  const icon = L.divIcon({
+    html: '<div class="turn-dot"></div>',
+    className: '',
+    iconSize: [10, 10],
+    iconAnchor: [5, 5]
+  });
+  for (const [lat, lon, name] of turns) {
+    L.marker([lat, lon], { icon })
+     .bindTooltip(name, { direction: 'top', offset: [0, -6] })
+     .addTo(markersLayer);
+  }
+}
+</script>
+</body>
+</html>
