@@ -164,7 +164,7 @@ async function processFile(file) {
   statusEl.textContent = 'Requête Overpass + calcul TbT…';
 
   try {
-    const res = await fetch('/api/process', {
+    const res = await fetch('/api', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ gpx: gpxText })
