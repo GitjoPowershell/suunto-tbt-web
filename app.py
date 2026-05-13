@@ -80,40 +80,18 @@ out body;"""
     )
     with urllib.request.urlopen(req, timeout=58) as resp:
         data = json.loads(resp.read())
-
-    node_coords: dict = {}
     node_count: dict = {}
-    node_adjacents: dict = {}
-    for el in data["elements"]:
-        if el["type"] == "node":
-            node_coords[el["id"]] = (el["lat"], el["lon"])
     for el in data["elements"]:
         if el["type"] == "way":
-            nodes = el["nodes"]
-            for k, nid in enumerate(nodes):
+            for nid in el["nodes"]:
                 node_count[nid] = node_count.get(nid, 0) + 1
-                adj = node_adjacents.setdefault(nid, set())
-                if k > 0:
-                    adj.add(nodes[k - 1])
-                if k < len(nodes) - 1:
-                    adj.add(nodes[k + 1])
-
-    junctions = []
-    for el in data["elements"]:
-        if el["type"] == "node" and node_count.get(el["id"], 0) >= 2:
-            jlat, jlon = el["lat"], el["lon"]
-            branch_bearings = [
-                bearing((jlat, jlon), node_coords[adj_id])
-                for adj_id in node_adjacents.get(el["id"], set())
-                if adj_id in node_coords
-            ]
-            junctions.append((jlat, jlon, branch_bearings))
-    return junctions
+    return [(el["lat"], el["lon"]) for el in data["elements"]
+            if el["type"] == "node" and node_count.get(el["id"], 0) >= 2]
 
 
 def snap_junctions_to_route(junctions, points):
-    hits: dict = {}
-    for jlat, jlon, branch_bearings in junctions:
+    hits: set = set()
+    for jlat, jlon in junctions:
         best_i, best_d = 0, float("inf")
         for i, pt in enumerate(points):
             d = haversine_m((jlat, jlon), pt)
@@ -121,8 +99,8 @@ def snap_junctions_to_route(junctions, points):
                 best_d = d
                 best_i = i
         if best_d <= SNAP_DIST_M:
-            hits.setdefault(best_i, []).extend(branch_bearings)
-    return hits
+            hits.add(best_i)
+    return sorted(hits)
 
 # ── Turn detection ─────────────────────────────────────────────────────────────
 
@@ -138,18 +116,7 @@ def _classify(turn_angle):
         return              "Slight_left_turn",  "Turn slight left"
 
 
-def _is_straightest_branch(b_in, b_out, branch_bearings):
-    """Suppress a turn notification if we're clearly the most direct path at this junction."""
-    our_dev = abs(signed_turn(b_in, b_out))
-    fwd = [(b, abs(signed_turn(b_in, b))) for b in branch_bearings
-           if abs(signed_turn(b_in, b)) < 150]
-    others = [dev for b, dev in fwd if abs(signed_turn(b_out, b)) > 25]
-    if not others:
-        return True
-    return our_dev + 25 <= min(others)
-
-
-def _turns_from_indices(points, indices, min_angle, junction_branches=None):
+def _turns_from_indices(points, indices, min_angle):
     n = len(points)
     cum = cumulative_distances(points)
     turns, last_d = [], -MIN_SPACING_M
@@ -165,14 +132,9 @@ def _turns_from_indices(points, indices, min_angle, junction_branches=None):
         k = i
         while k < n - 1 and cum[k] - d < WINDOW_M:
             k += 1
-        b_in = bearing(points[j], points[i])
-        b_out = bearing(points[i], points[k])
-        turn = signed_turn(b_in, b_out)
+        turn = signed_turn(bearing(points[j], points[i]), bearing(points[i], points[k]))
         if abs(turn) < min_angle:
             continue
-        if junction_branches and i in junction_branches:
-            if _is_straightest_branch(b_in, b_out, junction_branches[i]):
-                continue
         last_d = d
         wpt_type, name = _classify(turn)
         turns.append((points[i][0], points[i][1], name, wpt_type))
@@ -182,9 +144,8 @@ def _turns_from_indices(points, indices, min_angle, junction_branches=None):
 def detect_turns(points):
     try:
         junctions = get_osm_junctions(points)
-        junction_branches = snap_junctions_to_route(junctions, points)
-        indices = sorted(junction_branches.keys())
-        return _turns_from_indices(points, indices, MIN_TURN_ANGLE, junction_branches), "osm"
+        indices = snap_junctions_to_route(junctions, points)
+        return _turns_from_indices(points, indices, MIN_TURN_ANGLE), "osm"
     except Exception:
         return _turns_from_indices(points, list(range(1, len(points) - 1)), 30), "angle"
 
@@ -266,3 +227,6 @@ def cors(response):
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
     return response
+
+    def log_message(self, *_):
+        pass
